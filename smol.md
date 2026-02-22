@@ -130,19 +130,20 @@ sudo su
 🏁 Root Flag
 cat /root/root.txt
 bf89ea3ea01992353aef1f576214d4e4
+
 🔗 Attack Chain Summary
 SSRF → wp-config.php → WP Admin
 → Hello Dolly RCE → Reverse Shell
 → Hash Dump → User Pivoting
 → Zip Crack → Credential Reuse
 → Sudo Misconfiguration → Root
+
 ✅ Conclusion
 
 This machine demonstrates how minor WordPress plugin vulnerabilities, when chained together, can lead to full system compromise.
+
 Key takeaways include:
 
 Plugin security is critical
-
 Credential reuse is dangerous
-
 Sudo misconfigurations are fatal
